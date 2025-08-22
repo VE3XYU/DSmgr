@@ -1,3 +1,4 @@
+# On Hold
 # DSmgr
 Digital Signage Manager using MRSS
 
@@ -21,7 +22,7 @@ Targeted Features:
 
 Not Sure Yet:
 
-1. My initial thought was that it would be a web app, but my goal is absolute simplicity.  Ideally, I wouldn't want the user to need any knowledge of web server config. Too many headaches, too many dependecies. I think it should be a compliled desktop app for the two good desktop operating systems, as well as Windows. Connection from desktop to server may just use SFTP. Interesting in using Qt, but I have no prior C++ experience.
+1. My initial thought was that it would be a web app, but my goal is absolute simplicity.  Ideally, I wouldn't want the user to need any knowledge of web server config. Too many headaches, too many dependecies. I think it should be a compiled desktop app for the two good desktop operating systems, as well as Windows. Connection from desktop to server may just use SFTP. Interested in using Qt.
 
 
 

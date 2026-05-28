@@ -11,19 +11,24 @@
       "label": "Weekend",
       "items": [
         { "file": "welcome.jpg", "type": "image", "duration": 8 },
-        { "file": "winter-activities.mp4", "type": "video", "duration": 0 },
+        { "file": "winter-activities.mp4", "type": "video", "duration": 0, "end": "2026-03-21T00:00" },
         { "file": "hours.jpg", "type": "image", "duration": 10 }
+      ]
+    },
+    "afterhours": {
+      "label": "After hours",
+      "items": [
+        { "file": "welcome.jpg", "type": "image", "duration": 10 }
       ]
     }
   },
   "schedule": {
-    "0": "weekend",
-    "1": "default",
-    "2": "default",
-    "3": "default",
-    "4": "default",
-    "5": "default",
-    "6": "weekend"
+    "rules": [
+      { "days": [0, 6], "from": "00:00", "to": "23:59", "playlist": "weekend" },
+      { "days": [1, 2, 3, 4, 5], "from": "00:00", "to": "17:00", "playlist": "default" },
+      { "days": [1, 2, 3, 4, 5], "from": "17:00", "to": "23:59", "playlist": "afterhours" }
+    ],
+    "default": "default"
   },
   "settings": {
     "transition_ms": 800,

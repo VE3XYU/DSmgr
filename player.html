@@ -36,16 +36,36 @@
   <div id="msg"></div>
 
 <script>
+"use strict";
+// Digital Signage Manager — player.
+// Designed to run unattended for weeks on a Raspberry Pi in Chromium kiosk mode.
+// Everything below is built to fail safe: a bad file, a stuck video, a network
+// blip or a missing asset must never freeze the screen or leak memory.
+
 const PLAYLIST_URL = "playlist.json";
 const UPLOADS = "uploads/";
 
+// Tunables (all overridable via playlist.json "settings")
+const FETCH_TIMEOUT_MS   = 15000;   // abort a hung config fetch
+const VIDEO_READY_MS     = 8000;    // start a video even if canplaythrough never fires
+const VIDEO_STALL_MS     = 15000;   // no playback progress for this long => move on
+const IMAGE_READY_MS     = 8000;    // skip an image that won't decode in time
+const EMPTY_RETRY_MS     = 3000;    // re-check when nothing is scheduled
+const ERROR_RETRY_MS     = 2000;    // back off after a media error
+const HEARTBEAT_MS        = 10000;  // independent recovery check
+const DEADLINE_SLACK_MS   = 5000;   // grace before the heartbeat intervenes
+
 let cfg = null;
-let queue = [];          // resolved list of items for today
+let queue = [];            // items resolved for "right now"
 let idx = 0;
 let activeLayer = "layerA";
-let advanceTimer = null;
-let currentDayKey = null;
-let lastConfigText = "";
+let cycle = 0;             // bumps on every advance; stale callbacks compare against it
+let advanceTimer = null;   // schedules the next image advance / retry
+let watchdogTimer = null;  // per-item readiness / stall watchdog
+let nextDeadline = 0;      // wall-clock time by which we expect to have advanced again
+let currentSig = "";       // signature of the resolved queue, to avoid needless restarts
+let lastConfigText = "";   // last raw config text successfully parsed
+let wantReload = false;    // set by the optional periodic-reload timer
 
 const layers = {
   layerA: document.getElementById("layerA"),
@@ -54,45 +74,91 @@ const layers = {
 
 function showMsg(t) { document.getElementById("msg").textContent = t; }
 
+function clearTimers() {
+  clearTimeout(advanceTimer);  advanceTimer = null;
+  clearTimeout(watchdogTimer); watchdogTimer = null;
+}
+
+function scheduleNext(ms) {
+  clearTimeout(advanceTimer);
+  advanceTimer = setTimeout(next, ms);
+  nextDeadline = Date.now() + ms + DEADLINE_SLACK_MS;
+}
+
 async function loadConfig() {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(PLAYLIST_URL + "?t=" + Date.now(), { cache: "no-store" });
+    const res = await fetch(PLAYLIST_URL + "?t=" + Date.now(), { cache: "no-store", signal: ctrl.signal });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const text = await res.text();
-    // Only rebuild the queue if something actually changed
     if (text !== lastConfigText) {
+      // Parse BEFORE committing: a truncated/corrupt file (e.g. read mid-save)
+      // must never replace a known-good config.
+      const parsed = JSON.parse(text);
+      cfg = parsed;
       lastConfigText = text;
-      cfg = JSON.parse(text);
       document.documentElement.style.setProperty(
         "--fade", (cfg.settings?.transition_ms ?? 800) + "ms");
       rebuildQueue();
     }
   } catch (e) {
-    showMsg("config error: " + e.message);
+    showMsg("config error: " + e.message);   // keep last good config and carry on
+  } finally {
+    clearTimeout(to);
   }
 }
 
-function todaysPlaylistKey() {
-  const day = String(new Date().getDay()); // 0=Sun .. 6=Sat
-  return cfg.schedule?.[day] || "default";
+// "HH:MM" -> minutes since midnight (also accepts "24:00"); null if unparseable.
+function hhmmToMin(s) {
+  if (typeof s !== "string") return null;
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return (+m[1]) * 60 + (+m[2]);
+}
+
+// Which playlist belongs on screen right now? Supports the time-aware "rules"
+// format and the legacy weekday map ({ "0":"weekend", ... }).
+function resolvePlaylistKey(now) {
+  const sched = (cfg && cfg.schedule) || {};
+  const day = now.getDay();                       // 0=Sun .. 6=Sat
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (Array.isArray(sched.rules)) {
+    for (const r of sched.rules) {
+      if (!r || !r.playlist) continue;
+      if (Array.isArray(r.days) && !r.days.map(Number).includes(day)) continue;
+      const lo = hhmmToMin(r.from);
+      const hi = hhmmToMin(r.to);
+      if (mins >= (lo ?? 0) && mins < (hi ?? 1440)) return r.playlist;
+    }
+    return sched.default || "default";
+  }
+  return sched[String(day)] || "default";          // legacy weekday map
+}
+
+// Is this item inside its optional start/end window right now? start/end are local
+// datetime strings like "2026-06-01T09:00". A passed `end` means the item has expired.
+function itemActive(item, now) {
+  const t = now.getTime();
+  if (item.start) { const s = Date.parse(item.start); if (!isNaN(s) && t < s) return false; }
+  if (item.end)   { const e = Date.parse(item.end);   if (!isNaN(e) && t > e) return false; }
+  return true;
 }
 
 function rebuildQueue() {
-  const key = todaysPlaylistKey();
+  if (!cfg) return;
+  const now = new Date();
+  const key = resolvePlaylistKey(now);
   const pl = cfg.playlists?.[key] || cfg.playlists?.default;
-  const newQueue = (pl?.items || []).filter(it => it && it.file);
-  // If the queue is unchanged, keep playing without interrupting
-  const sig = JSON.stringify(newQueue);
-  if (sig !== JSON.stringify(queue) || key !== currentDayKey) {
+  const newQueue = (pl?.items || []).filter(it => it && it.file && itemActive(it, now));
+  const sig = key + "|" + JSON.stringify(newQueue);
+  // Only disturb playback when the resolved queue actually changes
+  if (sig !== currentSig) {
     queue = newQueue;
-    currentDayKey = key;
+    currentSig = sig;
     if (idx >= queue.length) idx = 0;
   }
-  if (queue.length === 0) {
-    showMsg("playlist '" + key + "' is empty");
-  } else {
-    showMsg("");
-  }
+  showMsg(queue.length ? "" : ("nothing scheduled for '" + key + "' right now"));
 }
 
 function buildElement(item) {
@@ -103,75 +169,148 @@ function buildElement(item) {
     v.autoplay = true;
     v.playsInline = true;
     v.preload = "auto";
+    v.controls = false;
     return v;
-  } else {
-    const img = document.createElement("img");
-    img.src = UPLOADS + item.file;
-    return img;
   }
+  const img = document.createElement("img");
+  img.src = UPLOADS + item.file;
+  return img;
+}
+
+// Free whatever media a layer is holding before we reuse it. Explicitly releasing
+// video decoders/buffers is what lets the Pi run for weeks without running out of memory.
+function releaseLayer(layer) {
+  const old = layer.firstChild;
+  if (old) {
+    if (old.tagName === "VIDEO") {
+      try { old.pause(); old.removeAttribute("src"); old.load(); } catch (e) {}
+    }
+    old.onended = old.onerror = old.onload = old.oncanplaythrough = old.onloadedmetadata = null;
+  }
+  layer.textContent = "";
+}
+
+// Watch a playing video for progress. Resets on each timeupdate; if playback makes
+// no progress for VIDEO_STALL_MS (stall, decode hang, or a missing 'ended' event),
+// we give up on the item and advance.
+function armVideoWatchdog(el, myCycle) {
+  const bump = () => {
+    if (myCycle !== cycle) return;
+    clearTimeout(watchdogTimer);
+    nextDeadline = Date.now() + VIDEO_STALL_MS + DEADLINE_SLACK_MS;
+    watchdogTimer = setTimeout(() => { if (myCycle === cycle) next(); }, VIDEO_STALL_MS);
+  };
+  el.addEventListener("timeupdate", bump);
+  bump();   // start the clock immediately, before the first timeupdate
 }
 
 function next() {
-  clearTimeout(advanceTimer);
-  if (!queue.length) {
-    // Nothing to show yet; check again shortly
-    advanceTimer = setTimeout(next, 3000);
-    return;
-  }
-  if (idx >= queue.length) {
-    idx = 0;
-    rebuildQueue(); // re-evaluate day-of-week at the top of each loop
-  }
-  const item = queue[idx];
-  const onLayer = (activeLayer === "layerA") ? "layerB" : "layerA";
-  const target = layers[onLayer];
-  const el = buildElement(item);
+  let myCycle;
+  try {
+    myCycle = ++cycle;        // invalidate every pending callback/timer from prior cycles
+    clearTimers();
 
-  // Clear the off-screen layer and load the next item into it
-  target.innerHTML = "";
-  target.appendChild(el);
+    if (wantReload) { location.reload(); return; }
 
-  const swap = () => {
-    layers[activeLayer].classList.remove("active");
-    target.classList.add("active");
-    activeLayer = onLayer;
-    idx++;
+    rebuildQueue();
+    if (!queue.length) { scheduleNext(EMPTY_RETRY_MS); return; }
+    if (idx >= queue.length) idx = 0;
+
+    const item = queue[idx];
+    const onLayer = (activeLayer === "layerA") ? "layerB" : "layerA";
+    const target = layers[onLayer];
+
+    releaseLayer(target);                 // free the previous element before reusing this layer
+    const el = buildElement(item);
+    target.appendChild(el);
+
+    let swapped = false;
+    const swap = () => {
+      if (swapped || myCycle !== cycle) return;   // run once, and only for the current cycle
+      swapped = true;
+      clearTimeout(watchdogTimer);
+      layers[activeLayer].classList.remove("active");
+      target.classList.add("active");
+      activeLayer = onLayer;
+      idx++;
+
+      if (item.type === "video") {
+        el.onended = () => { if (myCycle === cycle) next(); };
+        armVideoWatchdog(el, myCycle);
+        const p = el.play();
+        if (p && p.catch) p.catch(() => { if (myCycle === cycle) scheduleNext(ERROR_RETRY_MS); });
+      } else {
+        const secs = (item.duration && item.duration > 0) ? item.duration : 10;
+        scheduleNext(secs * 1000);
+      }
+    };
+
+    // A media error never stalls the loop — back off briefly and move on.
+    el.onerror = () => { if (myCycle === cycle) scheduleNext(ERROR_RETRY_MS); };
 
     if (item.type === "video") {
-      el.onended = next;
-      el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
-      el.play().catch(() => { advanceTimer = setTimeout(next, 2000); });
+      el.oncanplaythrough = swap;
+      // If the video never signals ready, start it anyway rather than sit on black.
+      watchdogTimer = setTimeout(() => { if (myCycle === cycle) swap(); }, VIDEO_READY_MS);
+      nextDeadline = Date.now() + VIDEO_READY_MS + DEADLINE_SLACK_MS;
     } else {
-      const secs = (item.duration && item.duration > 0) ? item.duration : 10;
-      advanceTimer = setTimeout(next, secs * 1000);
+      if (el.complete && el.naturalWidth > 0) {
+        swap();
+      } else {
+        el.onload = swap;
+        // Skip an image that won't decode instead of showing a blank panel.
+        watchdogTimer = setTimeout(() => {
+          if (myCycle === cycle && !swapped) scheduleNext(ERROR_RETRY_MS);
+        }, IMAGE_READY_MS);
+        nextDeadline = Date.now() + IMAGE_READY_MS + DEADLINE_SLACK_MS;
+      }
     }
-  };
-
-  // Wait until the media is ready before crossfading, to avoid black flashes
-  if (item.type === "video") {
-    el.oncanplaythrough = swap;
-    el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
-    // Safety net if canplaythrough never fires
-    setTimeout(() => { if (activeLayer !== onLayer) swap(); }, 4000);
-  } else {
-    if (el.complete) { swap(); }
-    else {
-      el.onload = swap;
-      el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
-    }
+  } catch (e) {
+    // Nothing in a single advance is allowed to kill the loop.
+    showMsg("loop error: " + (e && e.message));
+    scheduleNext(EMPTY_RETRY_MS);
   }
 }
 
-// Recover if the tab was throttled/hidden (Chromium kiosk shouldn't hide, but just in case)
+// Independent safety net: if the primary timer/handler chain ever breaks and we
+// blow past the expected deadline, force the loop back to life.
+function heartbeat() {
+  if (!cfg) return;
+  if (Date.now() > nextDeadline + 2000) {
+    showMsg("watchdog: recovering…");
+    next();
+  }
+}
+
+// Optional: reload the page every settings.reload_hours to shrug off any slow
+// browser-side memory growth. Reload is deferred to an item boundary (top of next())
+// so it never interrupts a playing video. 0/absent = disabled.
+function scheduleReload() {
+  const hrs = Number(cfg?.settings?.reload_hours) || 0;
+  if (hrs > 0) setTimeout(() => { wantReload = true; }, hrs * 3600000);
+}
+
+// Recover if the tab was throttled/hidden (a kiosk shouldn't hide, but just in case).
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) { clearTimeout(advanceTimer); next(); }
+  if (!document.hidden) next();   // next() bumps the cycle and clears timers, so this is safe
 });
+
+function startLoops() {
+  next();
+  setInterval(loadConfig, (cfg?.settings?.poll_seconds ?? 60) * 1000);
+  setInterval(heartbeat, HEARTBEAT_MS);
+  scheduleReload();
+}
 
 async function start() {
   await loadConfig();
-  next();
-  // Poll for content/schedule changes
-  setInterval(loadConfig, (cfg?.settings?.poll_seconds ?? 60) * 1000);
+  // Don't begin the loop until we have a usable config; retry quickly on boot
+  // (e.g. server still coming up) without spamming.
+  while (!cfg) {
+    await new Promise(r => setTimeout(r, 5000));
+    await loadConfig();
+  }
+  startLoops();
 }
 start();
 </script>

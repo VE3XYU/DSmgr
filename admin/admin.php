@@ -48,9 +48,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
       $notice = "NOT SAVED — invalid JSON: " . json_last_error_msg();
     } else {
-      // pretty-print so it stays human-editable
-      file_put_contents($PLAYLIST, json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-      $notice = "Playlist saved.";
+      // pretty-print so it stays human-editable; write atomically (temp + rename)
+      // so the player never reads a half-written file mid-save.
+      $json = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+      $tmp  = $PLAYLIST . '.tmp';
+      if (file_put_contents($tmp, $json) !== false && rename($tmp, $PLAYLIST)) {
+        $notice = "Playlist saved.";
+      } else {
+        @unlink($tmp);
+        $notice = "NOT SAVED — could not write playlist.json (check folder permissions).";
+      }
     }
   }
 }
@@ -64,9 +71,11 @@ foreach (scandir($UPLOADS) as $f) {
   $files[] = ['name'=>$f, 'type'=>in_array($ext,$VIDEO_EXT)?'video':'image',
               'size'=>filesize("$UPLOADS/$f")];
 }
-$playlist_raw = file_exists($PLAYLIST)
-  ? json_encode(read_playlist($PLAYLIST), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
-  : "{}";
+$playlist_data = read_playlist($PLAYLIST);
+$playlist_raw  = json_encode($playlist_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+// Safe to embed inside a <script> tag
+$JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES;
 
 function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<3){$bytes/=1024;$i++;} return round($bytes,1).' '.$u[$i]; }
 ?>
@@ -79,6 +88,7 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
 <style>
   body { font-family: system-ui, sans-serif; max-width: 900px; margin: 1.5rem auto; padding: 0 1rem; color:#222; }
   h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 2rem; border-bottom:1px solid #ddd; padding-bottom:.3rem;}
+  h3 { font-size: .95rem; margin: 0; }
   .notice { background:#eef6ff; border:1px solid #b6d4f5; padding:.6rem .8rem; border-radius:6px; }
   table { border-collapse: collapse; width:100%; }
   td, th { text-align:left; padding:.4rem .6rem; border-bottom:1px solid #eee; font-size:.9rem; }
@@ -87,6 +97,24 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
   .tag { font-size:.7rem; padding:.1rem .4rem; border-radius:4px; background:#eee; }
   .tag.video { background:#ffe6cc; } .tag.image { background:#e6f0ff; }
   code { background:#f4f4f4; padding:.1rem .3rem; border-radius:3px; }
+
+  /* --- Structured playlist editor --- */
+  .bar { display:flex; gap:.5rem; align-items:center; margin:1.1rem 0 .4rem; }
+  .bar h3 { flex:1; }
+  .pl { border:1px solid #ddd; border-radius:8px; padding:.7rem .8rem; margin-bottom:1rem; }
+  .pl > header { display:flex; gap:.5rem; align-items:center; justify-content:space-between; margin-bottom:.3rem; }
+  .pl > header input[type=text] { font-size:.85rem; padding:.15rem .3rem; }
+  table.items { width:100%; }
+  table.items th, table.items td { padding:.3rem .4rem; border-bottom:1px solid #f3f3f3; font-size:.82rem; vertical-align:middle; }
+  table.items input[type=number] { width:4.5rem; }
+  table.items input[type=datetime-local] { font-size:.78rem; }
+  table.items select { max-width:14rem; }
+  .row-btns button, .rule-btns button { padding:.1rem .4rem; font-size:.8rem; }
+  .rule { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; border:1px solid #eee; border-radius:6px; padding:.4rem .55rem; margin-bottom:.4rem; font-size:.83rem; }
+  .rule .days label { font-size:.72rem; margin-right:.2rem; white-space:nowrap; }
+  .rule input[type=time] { font-size:.8rem; }
+  .muted { color:#999; } .missing { color:#c00; }
+  details.adv { margin-top:1.5rem; } details.adv summary { cursor:pointer; color:#36c; }
 </style>
 </head>
 <body>
@@ -99,7 +127,7 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
     <input type="file" name="media[]" multiple accept="image/*,video/*" required>
     <button type="submit">Upload</button>
   </form>
-  <p style="font-size:.8rem;color:#666">Images: jpg, png, gif, webp · Video: mp4, webm. Export images at 1920×1080.</p>
+  <p style="font-size:.8rem;color:#666">Images: jpg, png, gif, webp · Video: mp4, webm, m4v. Export images at 1920×1080.</p>
 
   <h2>Current files</h2>
   <table>
@@ -123,15 +151,247 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
 
   <h2>Playlists &amp; schedule</h2>
   <p style="font-size:.85rem;color:#555">
-    Edit the JSON below. <code>playlists</code> = named lists of items (each with <code>file</code>,
-    <code>type</code>, and <code>duration</code> in seconds — videos use <code>0</code>, they play to the end).
-    <code>schedule</code> maps weekday → playlist name (<code>0</code>=Sunday … <code>6</code>=Saturday).
-    The screen updates within a minute of saving.
+    A <b>playlist</b> is an ordered list of items. Each item has a <b>duration</b> in seconds
+    (videos play to the end, so they use 0) and an optional <b>start/end</b> window — outside that
+    window the item is hidden, and it disappears for good once the end passes. The <b>schedule</b>
+    decides which playlist is on screen: rules are checked top to bottom, and the first one matching
+    today's weekday and the current time wins. The screen updates within a minute of saving.
   </p>
-  <form method="post">
+
+  <form method="post" id="editorForm">
     <input type="hidden" name="action" value="save_playlist">
-    <textarea name="playlist_json"><?= htmlspecialchars($playlist_raw) ?></textarea>
+    <input type="hidden" name="playlist_json" id="playlist_json">
+
+    <div class="bar"><h3>Playlists</h3>
+      <button type="button" onclick="addPlaylist()">+ Add playlist</button></div>
+    <div id="playlists"></div>
+
+    <div class="bar"><h3>Schedule</h3>
+      <button type="button" onclick="addRule()">+ Add rule</button></div>
+    <div id="rules"></div>
+    <p style="font-size:.83rem">When no rule matches, show:
+      <select id="schedDefault"></select></p>
+
+    <div class="bar"><h3>Settings</h3></div>
+    <p style="font-size:.83rem">
+      Crossfade (ms): <input type="number" id="setTransition" min="0" style="width:6rem">
+      &nbsp;·&nbsp; Re-check every (seconds): <input type="number" id="setPoll" min="5" style="width:6rem">
+    </p>
+
     <p><button type="submit">Save playlist</button></p>
   </form>
+
+  <details class="adv">
+    <summary>Advanced — edit raw JSON</summary>
+    <p style="font-size:.82rem;color:#666">Edits here are validated before saving. Use this for bulk
+      changes or to rename a playlist id (the visual editor above can't rename ids).</p>
+    <form method="post">
+      <input type="hidden" name="action" value="save_playlist">
+      <textarea name="playlist_json"><?= htmlspecialchars($playlist_raw) ?></textarea>
+      <p><button type="submit">Save raw JSON</button></p>
+    </form>
+  </details>
+
+<script>
+const VIDEO_EXT = ["mp4","webm","m4v"];
+const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const FILES = <?= json_encode($files, $JS) ?>;
+let DATA = <?= json_encode($playlist_data, $JS) ?>;
+
+// --- Normalise loaded data so the editor always has something to render ---
+DATA.playlists = DATA.playlists || {};
+DATA.settings  = DATA.settings  || {};
+DATA.schedule  = normalizeSchedule(DATA.schedule);
+
+function firstPlaylistKey(){ const k = Object.keys(DATA.playlists); return k.length ? k[0] : "default"; }
+
+// Upgrade the legacy weekday map ({ "0":"weekend", ... }) to the rules format for editing.
+function normalizeSchedule(sched){
+  if (sched && Array.isArray(sched.rules))
+    return { rules: sched.rules, default: sched.default || firstPlaylistKey() };
+  const rules = [];
+  if (sched && typeof sched === "object") {
+    const byPl = {};
+    for (let d = 0; d < 7; d++){ const k = sched[String(d)]; if (k) (byPl[k] = byPl[k] || []).push(d); }
+    for (const pl in byPl) rules.push({ days: byPl[pl], from: "00:00", to: "23:59", playlist: pl });
+  }
+  return { rules, default: firstPlaylistKey() };
+}
+
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function el(html){ const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
+function typeFromName(name){ return VIDEO_EXT.includes((name.split(".").pop()||"").toLowerCase()) ? "video" : "image"; }
+
+// --- Playlist / item mutations ---
+function setLabel(pk, v){ DATA.playlists[pk].label = v; }
+function setItem(pk, i, field, v){
+  const it = DATA.playlists[pk].items[i];
+  if (field === "duration") v = parseInt(v, 10) || 0;
+  it[field] = v;
+}
+function setItemFile(pk, i, name){
+  const it = DATA.playlists[pk].items[i];
+  it.file = name;
+  const t = typeFromName(name);
+  if (t !== it.type){
+    it.type = t;
+    it.duration = (t === "video") ? 0 : (it.duration || 10);
+    renderPlaylists();            // type flip changes the duration field
+  }
+}
+function moveItem(pk, i, dir){
+  const a = DATA.playlists[pk].items, j = i + dir;
+  if (j < 0 || j >= a.length) return;
+  [a[i], a[j]] = [a[j], a[i]]; renderPlaylists();
+}
+function removeItem(pk, i){ DATA.playlists[pk].items.splice(i, 1); renderPlaylists(); }
+function addItem(pk){
+  const first = FILES[0] ? FILES[0].name : "";
+  const t = first ? typeFromName(first) : "image";
+  DATA.playlists[pk].items.push({ file: first, type: t, duration: t === "video" ? 0 : 10 });
+  renderPlaylists();
+}
+function addPlaylist(){
+  let key = prompt("New playlist id (letters, numbers, - and _):", "");
+  if (!key) return;
+  key = key.replace(/[^A-Za-z0-9_-]/g, "");
+  if (!key) { alert("Id must contain letters or numbers."); return; }
+  if (DATA.playlists[key]) { alert("That id already exists."); return; }
+  DATA.playlists[key] = { label: key, items: [] };
+  renderAll();
+}
+function removePlaylist(pk){
+  if (!confirm("Delete playlist '" + pk + "'? Its items are removed (uploaded files stay).")) return;
+  delete DATA.playlists[pk];
+  renderAll();
+}
+
+// --- Schedule mutations ---
+function toggleDay(i, d, on){
+  const r = DATA.schedule.rules[i]; r.days = r.days || [];
+  const k = r.days.indexOf(d);
+  if (on && k < 0) r.days.push(d);
+  if (!on && k >= 0) r.days.splice(k, 1);
+  r.days.sort((a, b) => a - b);
+}
+function setRule(i, field, v){ DATA.schedule.rules[i][field] = v; }
+function moveRule(i, dir){
+  const a = DATA.schedule.rules, j = i + dir;
+  if (j < 0 || j >= a.length) return;
+  [a[i], a[j]] = [a[j], a[i]]; renderRules();
+}
+function removeRule(i){ DATA.schedule.rules.splice(i, 1); renderRules(); }
+function addRule(){
+  DATA.schedule.rules.push({ days: [0,1,2,3,4,5,6], from: "00:00", to: "23:59", playlist: firstPlaylistKey() });
+  renderRules();
+}
+
+// --- Rendering ---
+function fileOptions(sel){
+  let opts = FILES.map(f => `<option value="${esc(f.name)}"${f.name === sel ? " selected" : ""}>${esc(f.name)}</option>`).join("");
+  if (sel && !FILES.some(f => f.name === sel))
+    opts = `<option value="${esc(sel)}" selected class="missing">${esc(sel)} — missing</option>` + opts;
+  if (!FILES.length && !sel) opts = `<option value="">(upload files first)</option>`;
+  return opts;
+}
+
+function renderPlaylists(){
+  const host = document.getElementById("playlists");
+  host.innerHTML = "";
+  const keys = Object.keys(DATA.playlists);
+  if (!keys.length){ host.innerHTML = '<p class="muted">No playlists yet — add one above.</p>'; return; }
+  for (const pk of keys){
+    const pl = DATA.playlists[pk]; pl.items = pl.items || [];
+    let rows = "";
+    pl.items.forEach((it, i) => {
+      const isVid = it.type === "video";
+      rows += `<tr>
+        <td><select onchange="setItemFile('${pk}',${i},this.value)">${fileOptions(it.file)}</select></td>
+        <td><span class="tag ${isVid ? 'video' : 'image'}">${isVid ? 'video' : 'image'}</span></td>
+        <td>${isVid
+          ? '<span class="muted">to end</span>'
+          : `<input type="number" min="1" value="${it.duration || 10}" onchange="setItem('${pk}',${i},'duration',this.value)">`}</td>
+        <td><input type="datetime-local" value="${esc(it.start || '')}" onchange="setItem('${pk}',${i},'start',this.value)"></td>
+        <td><input type="datetime-local" value="${esc(it.end || '')}" onchange="setItem('${pk}',${i},'end',this.value)"></td>
+        <td class="row-btns">
+          <button type="button" onclick="moveItem('${pk}',${i},-1)" title="Move up">↑</button>
+          <button type="button" onclick="moveItem('${pk}',${i},1)" title="Move down">↓</button>
+          <button type="button" onclick="removeItem('${pk}',${i})" title="Remove">✕</button>
+        </td></tr>`;
+    });
+    host.appendChild(el(`<div class="pl">
+      <header>
+        <div>id <code>${esc(pk)}</code> &nbsp; label
+          <input type="text" value="${esc(pl.label || '')}" onchange="setLabel('${pk}',this.value)"></div>
+        <button type="button" onclick="removePlaylist('${pk}')">Delete playlist</button>
+      </header>
+      <table class="items">
+        <tr><th>File</th><th>Type</th><th>Duration (s)</th><th>Start (optional)</th><th>End (optional)</th><th></th></tr>
+        ${rows || '<tr><td colspan="6" class="muted">No items yet.</td></tr>'}
+      </table>
+      <p style="margin:.4rem 0 0"><button type="button" onclick="addItem('${pk}')">+ Add item</button></p>
+    </div>`));
+  }
+}
+
+function renderRules(){
+  const host = document.getElementById("rules");
+  host.innerHTML = "";
+  DATA.schedule.rules = DATA.schedule.rules || [];
+  if (!DATA.schedule.rules.length)
+    host.innerHTML = '<p class="muted">No rules — the fallback playlist below always shows.</p>';
+  DATA.schedule.rules.forEach((r, i) => {
+    const days = (r.days || []).map(Number);
+    const dayboxes = DAY_NAMES.map((nm, d) =>
+      `<label><input type="checkbox"${days.includes(d) ? " checked" : ""} onchange="toggleDay(${i},${d},this.checked)">${nm}</label>`).join("");
+    const plopts = Object.keys(DATA.playlists).map(k =>
+      `<option value="${esc(k)}"${k === r.playlist ? " selected" : ""}>${esc(k)}</option>`).join("");
+    host.appendChild(el(`<div class="rule">
+      <span class="days">${dayboxes}</span>
+      <span>from <input type="time" value="${esc(r.from || '00:00')}" onchange="setRule(${i},'from',this.value)"></span>
+      <span>to <input type="time" value="${esc(r.to || '23:59')}" onchange="setRule(${i},'to',this.value)"></span>
+      <span>show <select onchange="setRule(${i},'playlist',this.value)">${plopts}</select></span>
+      <span class="rule-btns">
+        <button type="button" onclick="moveRule(${i},-1)" title="Move up">↑</button>
+        <button type="button" onclick="moveRule(${i},1)" title="Move down">↓</button>
+        <button type="button" onclick="removeRule(${i})" title="Remove">✕</button>
+      </span></div>`));
+  });
+}
+
+function renderSchedDefault(){
+  const sel = document.getElementById("schedDefault");
+  const keys = Object.keys(DATA.playlists);
+  if (keys.length && !keys.includes(DATA.schedule.default)) DATA.schedule.default = keys[0];
+  sel.innerHTML = keys.length
+    ? keys.map(k => `<option value="${esc(k)}"${k === DATA.schedule.default ? " selected" : ""}>${esc(k)}</option>`).join("")
+    : '<option value="default">default</option>';
+}
+
+function renderAll(){ renderPlaylists(); renderRules(); renderSchedDefault(); }
+
+// --- Settings + submit ---
+document.getElementById("schedDefault").addEventListener("change", e => { DATA.schedule.default = e.target.value; });
+
+const setT = document.getElementById("setTransition"), setP = document.getElementById("setPoll");
+setT.value = DATA.settings.transition_ms ?? 800;
+setP.value = DATA.settings.poll_seconds ?? 60;
+setT.addEventListener("change", e => { DATA.settings.transition_ms = parseInt(e.target.value, 10) || 0; });
+setP.addEventListener("change", e => { DATA.settings.poll_seconds = parseInt(e.target.value, 10) || 60; });
+
+document.getElementById("editorForm").addEventListener("submit", () => {
+  // Tidy the data: drop empty start/end, force videos to duration 0
+  for (const pk in DATA.playlists){
+    (DATA.playlists[pk].items || []).forEach(it => {
+      if (!it.start) delete it.start;
+      if (!it.end) delete it.end;
+      if (it.type === "video") it.duration = 0;
+    });
+  }
+  document.getElementById("playlist_json").value = JSON.stringify(DATA, null, 2);
+});
+
+renderAll();
+</script>
 </body>
 </html>

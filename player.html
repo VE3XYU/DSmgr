@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Signage</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden; cursor: none;
+  }
+  /* Two stacked layers for crossfade double-buffering */
+  .layer {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    opacity: 0;
+    transition: opacity var(--fade, 800ms) ease-in-out;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  .layer.active { opacity: 1; }
+  .layer img, .layer video {
+    width: 100%; height: 100%;
+    object-fit: contain;   /* never crop; letterbox instead. change to 'cover' to fill+crop */
+  }
+  #msg {
+    position: fixed; bottom: 12px; left: 12px;
+    color: #333; font: 12px monospace; z-index: 99;
+  }
+</style>
+</head>
+<body>
+  <div id="layerA" class="layer"></div>
+  <div id="layerB" class="layer"></div>
+  <div id="msg"></div>
+
+<script>
+const PLAYLIST_URL = "playlist.json";
+const UPLOADS = "uploads/";
+
+let cfg = null;
+let queue = [];          // resolved list of items for today
+let idx = 0;
+let activeLayer = "layerA";
+let advanceTimer = null;
+let currentDayKey = null;
+let lastConfigText = "";
+
+const layers = {
+  layerA: document.getElementById("layerA"),
+  layerB: document.getElementById("layerB"),
+};
+
+function showMsg(t) { document.getElementById("msg").textContent = t; }
+
+async function loadConfig() {
+  try {
+    const res = await fetch(PLAYLIST_URL + "?t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const text = await res.text();
+    // Only rebuild the queue if something actually changed
+    if (text !== lastConfigText) {
+      lastConfigText = text;
+      cfg = JSON.parse(text);
+      document.documentElement.style.setProperty(
+        "--fade", (cfg.settings?.transition_ms ?? 800) + "ms");
+      rebuildQueue();
+    }
+  } catch (e) {
+    showMsg("config error: " + e.message);
+  }
+}
+
+function todaysPlaylistKey() {
+  const day = String(new Date().getDay()); // 0=Sun .. 6=Sat
+  return cfg.schedule?.[day] || "default";
+}
+
+function rebuildQueue() {
+  const key = todaysPlaylistKey();
+  const pl = cfg.playlists?.[key] || cfg.playlists?.default;
+  const newQueue = (pl?.items || []).filter(it => it && it.file);
+  // If the queue is unchanged, keep playing without interrupting
+  const sig = JSON.stringify(newQueue);
+  if (sig !== JSON.stringify(queue) || key !== currentDayKey) {
+    queue = newQueue;
+    currentDayKey = key;
+    if (idx >= queue.length) idx = 0;
+  }
+  if (queue.length === 0) {
+    showMsg("playlist '" + key + "' is empty");
+  } else {
+    showMsg("");
+  }
+}
+
+function buildElement(item) {
+  if (item.type === "video") {
+    const v = document.createElement("video");
+    v.src = UPLOADS + item.file;
+    v.muted = true;            // required for reliable autoplay
+    v.autoplay = true;
+    v.playsInline = true;
+    v.preload = "auto";
+    return v;
+  } else {
+    const img = document.createElement("img");
+    img.src = UPLOADS + item.file;
+    return img;
+  }
+}
+
+function next() {
+  clearTimeout(advanceTimer);
+  if (!queue.length) {
+    // Nothing to show yet; check again shortly
+    advanceTimer = setTimeout(next, 3000);
+    return;
+  }
+  if (idx >= queue.length) {
+    idx = 0;
+    rebuildQueue(); // re-evaluate day-of-week at the top of each loop
+  }
+  const item = queue[idx];
+  const onLayer = (activeLayer === "layerA") ? "layerB" : "layerA";
+  const target = layers[onLayer];
+  const el = buildElement(item);
+
+  // Clear the off-screen layer and load the next item into it
+  target.innerHTML = "";
+  target.appendChild(el);
+
+  const swap = () => {
+    layers[activeLayer].classList.remove("active");
+    target.classList.add("active");
+    activeLayer = onLayer;
+    idx++;
+
+    if (item.type === "video") {
+      el.onended = next;
+      el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
+      el.play().catch(() => { advanceTimer = setTimeout(next, 2000); });
+    } else {
+      const secs = (item.duration && item.duration > 0) ? item.duration : 10;
+      advanceTimer = setTimeout(next, secs * 1000);
+    }
+  };
+
+  // Wait until the media is ready before crossfading, to avoid black flashes
+  if (item.type === "video") {
+    el.oncanplaythrough = swap;
+    el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
+    // Safety net if canplaythrough never fires
+    setTimeout(() => { if (activeLayer !== onLayer) swap(); }, 4000);
+  } else {
+    if (el.complete) { swap(); }
+    else {
+      el.onload = swap;
+      el.onerror = () => { advanceTimer = setTimeout(next, 2000); };
+    }
+  }
+}
+
+// Recover if the tab was throttled/hidden (Chromium kiosk shouldn't hide, but just in case)
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { clearTimeout(advanceTimer); next(); }
+});
+
+async function start() {
+  await loadConfig();
+  next();
+  // Poll for content/schedule changes
+  setInterval(loadConfig, (cfg?.settings?.poll_seconds ?? 60) * 1000);
+}
+start();
+</script>
+</body>
+</html>

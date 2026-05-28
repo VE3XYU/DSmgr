@@ -1,0 +1,32 @@
+{
+  "playlists": {
+    "default": {
+      "label": "Everyday",
+      "items": [
+        { "file": "welcome.jpg", "type": "image", "duration": 10 },
+        { "file": "hours.jpg", "type": "image", "duration": 12 }
+      ]
+    },
+    "weekend": {
+      "label": "Weekend",
+      "items": [
+        { "file": "welcome.jpg", "type": "image", "duration": 8 },
+        { "file": "winter-activities.mp4", "type": "video", "duration": 0 },
+        { "file": "hours.jpg", "type": "image", "duration": 10 }
+      ]
+    }
+  },
+  "schedule": {
+    "0": "weekend",
+    "1": "default",
+    "2": "default",
+    "3": "default",
+    "4": "default",
+    "5": "default",
+    "6": "weekend"
+  },
+  "settings": {
+    "transition_ms": 800,
+    "poll_seconds": 60
+  }
+}

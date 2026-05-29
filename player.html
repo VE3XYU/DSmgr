@@ -65,7 +65,10 @@ let watchdogTimer = null;  // per-item readiness / stall watchdog
 let nextDeadline = 0;      // wall-clock time by which we expect to have advanced again
 let currentSig = "";       // signature of the resolved queue, to avoid needless restarts
 let lastConfigText = "";   // last raw config text successfully parsed
-let wantReload = false;    // set by the optional periodic-reload timer
+let wantReload = false;    // set when an optional periodic reload is due
+let cfgVersion = 0;        // bumps each time a new config is parsed; part of the queue signature
+let pollTimer = null;      // self-rescheduling config poll (re-reads poll_seconds each cycle)
+const bootStart = Date.now();
 
 const layers = {
   layerA: document.getElementById("layerA"),
@@ -97,6 +100,7 @@ async function loadConfig() {
       // must never replace a known-good config.
       const parsed = JSON.parse(text);
       cfg = parsed;
+      cfgVersion++;
       lastConfigText = text;
       document.documentElement.style.setProperty(
         "--fade", (cfg.settings?.transition_ms ?? 800) + "ms");
@@ -127,9 +131,12 @@ function resolvePlaylistKey(now) {
     for (const r of sched.rules) {
       if (!r || !r.playlist) continue;
       if (Array.isArray(r.days) && !r.days.map(Number).includes(day)) continue;
-      const lo = hhmmToMin(r.from);
-      const hi = hhmmToMin(r.to);
-      if (mins >= (lo ?? 0) && mins < (hi ?? 1440)) return r.playlist;
+      const lo = hhmmToMin(r.from) ?? 0;
+      let hi = hhmmToMin(r.to) ?? 1440;
+      // The editor emits "23:59" as its end-of-day value; treat it as midnight so the
+      // final minute of the day isn't left uncovered (matching is half-open: [lo, hi)).
+      if (hi === 1439) hi = 1440;
+      if (mins >= lo && mins < hi) return r.playlist;
     }
     return sched.default || "default";
   }
@@ -151,12 +158,18 @@ function rebuildQueue() {
   const key = resolvePlaylistKey(now);
   const pl = cfg.playlists?.[key] || cfg.playlists?.default;
   const newQueue = (pl?.items || []).filter(it => it && it.file && itemActive(it, now));
-  const sig = key + "|" + JSON.stringify(newQueue);
-  // Only disturb playback when the resolved queue actually changes
+  // Cheap signature instead of JSON.stringify-ing the whole queue every advance: item
+  // definitions are fixed within a config version, so config version + resolved key +
+  // the active items' file sequence fully determines what plays right now.
+  let sig = cfgVersion + "|" + key + "|" + newQueue.length;
+  for (const it of newQueue) sig += "|" + it.file;
+  // Only disturb playback when the resolved queue actually changes; when it does,
+  // restart from the top so a content/schedule change can't leave idx pointing at
+  // shifted items (which would silently skip one each change).
   if (sig !== currentSig) {
     queue = newQueue;
     currentSig = sig;
-    if (idx >= queue.length) idx = 0;
+    idx = 0;
   }
   showMsg(queue.length ? "" : ("nothing scheduled for '" + key + "' right now"));
 }
@@ -276,18 +289,23 @@ function next() {
 // blow past the expected deadline, force the loop back to life.
 function heartbeat() {
   if (!cfg) return;
+  // Optional periodic reload to shrug off slow browser-side memory growth. Evaluated
+  // live (not captured once at boot), so changing settings.reload_hours takes effect.
+  // The actual reload happens at the next item boundary (top of next()), never mid-video.
+  const hrs = Number(cfg.settings?.reload_hours) || 0;
+  if (hrs > 0 && Date.now() - bootStart >= hrs * 3600000) wantReload = true;
   if (Date.now() > nextDeadline + 2000) {
     showMsg("watchdog: recovering…");
     next();
   }
 }
 
-// Optional: reload the page every settings.reload_hours to shrug off any slow
-// browser-side memory growth. Reload is deferred to an item boundary (top of next())
-// so it never interrupts a playing video. 0/absent = disabled.
-function scheduleReload() {
-  const hrs = Number(cfg?.settings?.reload_hours) || 0;
-  if (hrs > 0) setTimeout(() => { wantReload = true; }, hrs * 3600000);
+// Self-rescheduling config poll. Re-reads poll_seconds each cycle, so changing the poll
+// interval (or any setting) takes effect on the next poll rather than only after a reload.
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const secs = Math.max(5, Number(cfg?.settings?.poll_seconds) || 60);
+  pollTimer = setTimeout(async () => { await loadConfig(); schedulePoll(); }, secs * 1000);
 }
 
 // Recover if the tab was throttled/hidden (a kiosk shouldn't hide, but just in case).
@@ -297,9 +315,8 @@ document.addEventListener("visibilitychange", () => {
 
 function startLoops() {
   next();
-  setInterval(loadConfig, (cfg?.settings?.poll_seconds ?? 60) * 1000);
+  schedulePoll();
   setInterval(heartbeat, HEARTBEAT_MS);
-  scheduleReload();
 }
 
 async function start() {

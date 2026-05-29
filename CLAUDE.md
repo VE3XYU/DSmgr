@@ -50,8 +50,9 @@ because it lives one level down in `admin/`. The deployed layout is e.g. `mds/pl
   `duration` seconds (default 10 if `0`/missing); videos use `duration: 0` and play to natural end.
   `object-fit: contain` letterboxes — switching to `cover` fills-and-crops.
 - **admin.php** saves `playlist.json` atomically (temp file + `rename`) so the player can't read a
-  half-written file. The dashboard's structured editor and the legacy raw-JSON textarea both post the
-  same `save_playlist` action; keep both working.
+  half-written file, falling back to an in-place write when the directory isn't writable. The
+  dashboard's structured editor and the legacy raw-JSON textarea both post the same `save_playlist`
+  action; keep both working.
 - **admin.php** sanitises upload filenames via `preg_replace('/[^A-Za-z0-9._-]/','_', ...)` — so a
   playlist must reference the sanitised name. Allowed types live in `$IMAGE_EXT` / `$VIDEO_EXT`; update
   both PHP arrays *and* the player's `buildElement` type handling if adding formats.

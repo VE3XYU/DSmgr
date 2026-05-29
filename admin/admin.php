@@ -48,15 +48,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
       $notice = "NOT SAVED — invalid JSON: " . json_last_error_msg();
     } else {
-      // pretty-print so it stays human-editable; write atomically (temp + rename)
-      // so the player never reads a half-written file mid-save.
+      // pretty-print so it stays human-editable. Prefer an atomic temp+rename so the
+      // player never reads a half-written file; if the directory isn't writable (some
+      // hosts allow overwriting the existing file but not creating/renaming in the dir),
+      // fall back to an in-place write so saving still works.
       $json = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
       $tmp  = $PLAYLIST . '.tmp';
-      if (file_put_contents($tmp, $json) !== false && rename($tmp, $PLAYLIST)) {
+      if (@file_put_contents($tmp, $json) !== false && @rename($tmp, $PLAYLIST)) {
         $notice = "Playlist saved.";
       } else {
         @unlink($tmp);
-        $notice = "NOT SAVED — could not write playlist.json (check folder permissions).";
+        if (@file_put_contents($PLAYLIST, $json) !== false) {
+          $notice = "Playlist saved.";
+        } else {
+          $notice = "NOT SAVED — could not write playlist.json (check folder permissions).";
+        }
       }
     }
   }
@@ -64,7 +70,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // --- Gather current state ---
 $files = [];
-foreach (scandir($UPLOADS) as $f) {
+$entries = is_dir($UPLOADS) ? scandir($UPLOADS) : [];
+foreach ($entries as $f) {
   if ($f === '.' || $f === '..') continue;
   $ext = strtolower(pathinfo($f, PATHINFO_EXTENSION));
   if (!in_array($ext, array_merge($IMAGE_EXT, $VIDEO_EXT))) continue;
@@ -74,10 +81,16 @@ foreach (scandir($UPLOADS) as $f) {
 $playlist_data = read_playlist($PLAYLIST);
 $playlist_raw  = json_encode($playlist_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
+// AJAX uploads/deletes return the refreshed file list as JSON and exit — the page
+// never reloads, so anything the user is mid-edit in the playlist editor is preserved.
+if (!empty($_POST['ajax'])) {
+  header('Content-Type: application/json');
+  echo json_encode(['notice'=>$notice, 'files'=>$files], JSON_UNESCAPED_SLASHES);
+  exit;
+}
+
 // Safe to embed inside a <script> tag
 $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES;
-
-function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<3){$bytes/=1024;$i++;} return round($bytes,1).' '.$u[$i]; }
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -94,6 +107,7 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
   td, th { text-align:left; padding:.4rem .6rem; border-bottom:1px solid #eee; font-size:.9rem; }
   textarea { width:100%; height:340px; font-family:monospace; font-size:.85rem; }
   button { cursor:pointer; padding:.35rem .7rem; }
+  button[disabled] { opacity:.6; cursor:default; }
   .tag { font-size:.7rem; padding:.1rem .4rem; border-radius:4px; background:#eee; }
   .tag.video { background:#ffe6cc; } .tag.image { background:#e6f0ff; }
   code { background:#f4f4f4; padding:.1rem .3rem; border-radius:3px; }
@@ -119,34 +133,23 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
 </head>
 <body>
   <h1>Digital Signage Manager — Dashboard</h1>
-  <?php if ($notice): ?><p class="notice"><?= htmlspecialchars($notice) ?></p><?php endif; ?>
+  <noscript><p class="notice" style="background:#fff3cd;border-color:#ffe69c">
+    This dashboard needs JavaScript to manage files and edit playlists. Please enable it.</p></noscript>
+  <p class="notice" id="notice"<?= $notice ? '' : ' style="display:none"' ?>><?= htmlspecialchars($notice) ?></p>
 
   <h2>Upload media</h2>
-  <form method="post" enctype="multipart/form-data">
+  <form method="post" enctype="multipart/form-data" id="uploadForm">
     <input type="hidden" name="action" value="upload">
     <input type="file" name="media[]" multiple accept="image/*,video/*" required>
     <button type="submit">Upload</button>
   </form>
-  <p style="font-size:.8rem;color:#666">Images: jpg, png, gif, webp · Video: mp4, webm, m4v. Export images at 1920×1080.</p>
+  <p style="font-size:.8rem;color:#666">Images: jpg, png, gif, webp · Video: mp4, webm, m4v. Export images at 1920×1080.
+    Uploading won't disturb edits in progress below.</p>
 
   <h2>Current files</h2>
   <table>
-    <tr><th>File</th><th>Type</th><th>Size</th><th></th></tr>
-    <?php foreach ($files as $f): ?>
-    <tr>
-      <td><code><?= htmlspecialchars($f['name']) ?></code></td>
-      <td><span class="tag <?= $f['type'] ?>"><?= $f['type'] ?></span></td>
-      <td><?= human($f['size']) ?></td>
-      <td>
-        <form method="post" onsubmit="return confirm('Delete <?= htmlspecialchars($f['name']) ?>?');" style="margin:0">
-          <input type="hidden" name="action" value="delete">
-          <input type="hidden" name="file" value="<?= htmlspecialchars($f['name']) ?>">
-          <button type="submit">Delete</button>
-        </form>
-      </td>
-    </tr>
-    <?php endforeach; ?>
-    <?php if (!$files): ?><tr><td colspan="4" style="color:#999">No files yet.</td></tr><?php endif; ?>
+    <thead><tr><th>File</th><th>Type</th><th>Size</th><th></th></tr></thead>
+    <tbody id="fileRows"></tbody>
   </table>
 
   <h2>Playlists &amp; schedule</h2>
@@ -193,10 +196,11 @@ function human($bytes){ $u=['B','KB','MB','GB']; $i=0; while($bytes>=1024 && $i<
   </details>
 
 <script>
-const VIDEO_EXT = ["mp4","webm","m4v"];
+const VIDEO_EXT = <?= json_encode(array_values($VIDEO_EXT), $JS) ?>;  // single source of truth: PHP $VIDEO_EXT
 const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const FILES = <?= json_encode($files, $JS) ?>;
 let DATA = <?= json_encode($playlist_data, $JS) ?>;
+let dirty = false;   // unsaved changes in the editor?
 
 // --- Normalise loaded data so the editor always has something to render ---
 DATA.playlists = DATA.playlists || {};
@@ -215,12 +219,15 @@ function normalizeSchedule(sched){
     for (let d = 0; d < 7; d++){ const k = sched[String(d)]; if (k) (byPl[k] = byPl[k] || []).push(d); }
     for (const pl in byPl) rules.push({ days: byPl[pl], from: "00:00", to: "23:59", playlist: pl });
   }
-  return { rules, default: firstPlaylistKey() };
+  // The player's legacy path falls back to the literal playlist "default" on unmapped
+  // days; keep that so merely opening + saving a legacy file doesn't change the screen.
+  return { rules, default: "default" };
 }
 
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function el(html){ const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
 function typeFromName(name){ return VIDEO_EXT.includes((name.split(".").pop()||"").toLowerCase()) ? "video" : "image"; }
+function markDirty(){ dirty = true; }
 
 // --- Playlist / item mutations ---
 function setLabel(pk, v){ DATA.playlists[pk].label = v; }
@@ -242,14 +249,14 @@ function setItemFile(pk, i, name){
 function moveItem(pk, i, dir){
   const a = DATA.playlists[pk].items, j = i + dir;
   if (j < 0 || j >= a.length) return;
-  [a[i], a[j]] = [a[j], a[i]]; renderPlaylists();
+  [a[i], a[j]] = [a[j], a[i]]; markDirty(); renderPlaylists();
 }
-function removeItem(pk, i){ DATA.playlists[pk].items.splice(i, 1); renderPlaylists(); }
+function removeItem(pk, i){ DATA.playlists[pk].items.splice(i, 1); markDirty(); renderPlaylists(); }
 function addItem(pk){
   const first = FILES[0] ? FILES[0].name : "";
   const t = first ? typeFromName(first) : "image";
   DATA.playlists[pk].items.push({ file: first, type: t, duration: t === "video" ? 0 : 10 });
-  renderPlaylists();
+  markDirty(); renderPlaylists();
 }
 function addPlaylist(){
   let key = prompt("New playlist id (letters, numbers, - and _):", "");
@@ -258,12 +265,12 @@ function addPlaylist(){
   if (!key) { alert("Id must contain letters or numbers."); return; }
   if (DATA.playlists[key]) { alert("That id already exists."); return; }
   DATA.playlists[key] = { label: key, items: [] };
-  renderAll();
+  markDirty(); renderAll();
 }
 function removePlaylist(pk){
   if (!confirm("Delete playlist '" + pk + "'? Its items are removed (uploaded files stay).")) return;
   delete DATA.playlists[pk];
-  renderAll();
+  markDirty(); renderAll();
 }
 
 // --- Schedule mutations ---
@@ -278,15 +285,28 @@ function setRule(i, field, v){ DATA.schedule.rules[i][field] = v; }
 function moveRule(i, dir){
   const a = DATA.schedule.rules, j = i + dir;
   if (j < 0 || j >= a.length) return;
-  [a[i], a[j]] = [a[j], a[i]]; renderRules();
+  [a[i], a[j]] = [a[j], a[i]]; markDirty(); renderRules();
 }
-function removeRule(i){ DATA.schedule.rules.splice(i, 1); renderRules(); }
+function removeRule(i){ DATA.schedule.rules.splice(i, 1); markDirty(); renderRules(); }
 function addRule(){
   DATA.schedule.rules.push({ days: [0,1,2,3,4,5,6], from: "00:00", to: "23:59", playlist: firstPlaylistKey() });
-  renderRules();
+  markDirty(); renderRules();
 }
 
-// --- Rendering ---
+// --- Rendering: file list (kept in sync with FILES so AJAX upload/delete needn't reload) ---
+function humanSize(b){ const u=['B','KB','MB','GB']; let i=0; b=Number(b)||0; while(b>=1024 && i<3){b/=1024;i++;} return (Math.round(b*10)/10)+' '+u[i]; }
+function renderFiles(){
+  const tb = document.getElementById("fileRows");
+  if (!FILES.length){ tb.innerHTML = '<tr><td colspan="4" style="color:#999">No files yet.</td></tr>'; return; }
+  tb.innerHTML = FILES.map(f => `<tr>
+    <td><code>${esc(f.name)}</code></td>
+    <td><span class="tag ${f.type === 'video' ? 'video' : 'image'}">${esc(f.type)}</span></td>
+    <td>${humanSize(f.size)}</td>
+    <td><button type="button" class="del" data-name="${esc(f.name)}">Delete</button></td>
+  </tr>`).join("");
+}
+
+// --- Rendering: playlists ---
 function fileOptions(sel){
   let opts = FILES.map(f => `<option value="${esc(f.name)}"${f.name === sel ? " selected" : ""}>${esc(f.name)}</option>`).join("");
   if (sel && !FILES.some(f => f.name === sel))
@@ -305,31 +325,31 @@ function renderPlaylists(){
     let rows = "";
     pl.items.forEach((it, i) => {
       const isVid = it.type === "video";
-      rows += `<tr>
-        <td><select onchange="setItemFile('${pk}',${i},this.value)">${fileOptions(it.file)}</select></td>
+      rows += `<tr data-i="${i}">
+        <td><select data-field="file">${fileOptions(it.file)}</select></td>
         <td><span class="tag ${isVid ? 'video' : 'image'}">${isVid ? 'video' : 'image'}</span></td>
         <td>${isVid
           ? '<span class="muted">to end</span>'
-          : `<input type="number" min="1" value="${it.duration || 10}" onchange="setItem('${pk}',${i},'duration',this.value)">`}</td>
-        <td><input type="datetime-local" value="${esc(it.start || '')}" onchange="setItem('${pk}',${i},'start',this.value)"></td>
-        <td><input type="datetime-local" value="${esc(it.end || '')}" onchange="setItem('${pk}',${i},'end',this.value)"></td>
+          : `<input type="number" min="1" data-field="duration" value="${it.duration || 10}">`}</td>
+        <td><input type="datetime-local" data-field="start" value="${esc(it.start || '')}"></td>
+        <td><input type="datetime-local" data-field="end" value="${esc(it.end || '')}"></td>
         <td class="row-btns">
-          <button type="button" onclick="moveItem('${pk}',${i},-1)" title="Move up">↑</button>
-          <button type="button" onclick="moveItem('${pk}',${i},1)" title="Move down">↓</button>
-          <button type="button" onclick="removeItem('${pk}',${i})" title="Remove">✕</button>
+          <button type="button" class="mv" data-dir="-1" title="Move up">↑</button>
+          <button type="button" class="mv" data-dir="1" title="Move down">↓</button>
+          <button type="button" class="rm" title="Remove">✕</button>
         </td></tr>`;
     });
-    host.appendChild(el(`<div class="pl">
+    host.appendChild(el(`<div class="pl" data-pk="${esc(pk)}">
       <header>
         <div>id <code>${esc(pk)}</code> &nbsp; label
-          <input type="text" value="${esc(pl.label || '')}" onchange="setLabel('${pk}',this.value)"></div>
-        <button type="button" onclick="removePlaylist('${pk}')">Delete playlist</button>
+          <input type="text" class="pl-label" value="${esc(pl.label || '')}"></div>
+        <button type="button" class="rm-pl">Delete playlist</button>
       </header>
       <table class="items">
         <tr><th>File</th><th>Type</th><th>Duration (s)</th><th>Start (optional)</th><th>End (optional)</th><th></th></tr>
         ${rows || '<tr><td colspan="6" class="muted">No items yet.</td></tr>'}
       </table>
-      <p style="margin:.4rem 0 0"><button type="button" onclick="addItem('${pk}')">+ Add item</button></p>
+      <p style="margin:.4rem 0 0"><button type="button" class="add-item">+ Add item</button></p>
     </div>`));
   }
 }
@@ -343,18 +363,18 @@ function renderRules(){
   DATA.schedule.rules.forEach((r, i) => {
     const days = (r.days || []).map(Number);
     const dayboxes = DAY_NAMES.map((nm, d) =>
-      `<label><input type="checkbox"${days.includes(d) ? " checked" : ""} onchange="toggleDay(${i},${d},this.checked)">${nm}</label>`).join("");
+      `<label><input type="checkbox" class="day" data-d="${d}"${days.includes(d) ? " checked" : ""}>${nm}</label>`).join("");
     const plopts = Object.keys(DATA.playlists).map(k =>
       `<option value="${esc(k)}"${k === r.playlist ? " selected" : ""}>${esc(k)}</option>`).join("");
-    host.appendChild(el(`<div class="rule">
+    host.appendChild(el(`<div class="rule" data-i="${i}">
       <span class="days">${dayboxes}</span>
-      <span>from <input type="time" value="${esc(r.from || '00:00')}" onchange="setRule(${i},'from',this.value)"></span>
-      <span>to <input type="time" value="${esc(r.to || '23:59')}" onchange="setRule(${i},'to',this.value)"></span>
-      <span>show <select onchange="setRule(${i},'playlist',this.value)">${plopts}</select></span>
+      <span>from <input type="time" data-field="from" value="${esc(r.from || '00:00')}"></span>
+      <span>to <input type="time" data-field="to" value="${esc(r.to || '23:59')}"></span>
+      <span>show <select data-field="playlist">${plopts}</select></span>
       <span class="rule-btns">
-        <button type="button" onclick="moveRule(${i},-1)" title="Move up">↑</button>
-        <button type="button" onclick="moveRule(${i},1)" title="Move down">↓</button>
-        <button type="button" onclick="removeRule(${i})" title="Remove">✕</button>
+        <button type="button" class="mv" data-dir="-1" title="Move up">↑</button>
+        <button type="button" class="mv" data-dir="1" title="Move down">↓</button>
+        <button type="button" class="rm" title="Remove">✕</button>
       </span></div>`));
   });
 }
@@ -368,7 +388,93 @@ function renderSchedDefault(){
     : '<option value="default">default</option>';
 }
 
-function renderAll(){ renderPlaylists(); renderRules(); renderSchedDefault(); }
+function renderAll(){ renderFiles(); renderPlaylists(); renderRules(); renderSchedDefault(); }
+
+// --- Uploads & deletes over fetch, so the page never reloads mid-edit ---
+function setNotice(msg){
+  const n = document.getElementById("notice");
+  n.textContent = msg || "";
+  n.style.display = msg ? "" : "none";
+}
+function applyFiles(files){
+  FILES.length = 0;
+  (files || []).forEach(f => FILES.push(f));
+  renderFiles();
+  renderPlaylists();   // refresh file dropdowns and any "missing" markers
+}
+async function postAjax(fd){
+  fd.set("ajax", "1");
+  const res = await fetch(location.href, { method: "POST", body: fd });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+document.getElementById("uploadForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const form = e.target, btn = form.querySelector("button");
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Uploading…";
+  try {
+    const data = await postAjax(new FormData(form));
+    applyFiles(data.files);
+    setNotice(data.notice || "Uploaded.");
+    form.reset();
+  } catch (err){ setNotice("Upload failed: " + err.message); }
+  finally { btn.disabled = false; btn.textContent = label; }
+});
+
+async function deleteFile(name){
+  if (!confirm("Delete " + name + "?")) return;
+  try {
+    const fd = new FormData();
+    fd.set("action", "delete"); fd.set("file", name);
+    const data = await postAjax(fd);
+    applyFiles(data.files);
+    setNotice(data.notice || ("Deleted " + name));
+  } catch (err){ setNotice("Delete failed: " + err.message); }
+}
+document.getElementById("fileRows").addEventListener("click", e => {
+  const b = e.target.closest("button.del");
+  if (b) deleteFile(b.dataset.name);
+});
+
+// --- Editor event delegation (one listener per container; survives re-renders, and
+//     avoids interpolating playlist ids into inline handlers — see fileRows pattern) ---
+const plHost = document.getElementById("playlists");
+plHost.addEventListener("click", e => {
+  const card = e.target.closest(".pl"); if (!card) return;
+  const pk = card.dataset.pk;
+  if (e.target.closest(".add-item")) return addItem(pk);
+  if (e.target.closest(".rm-pl")) return removePlaylist(pk);
+  const row = e.target.closest("tr[data-i]"); if (!row) return;
+  const i = +row.dataset.i;
+  const mv = e.target.closest(".mv");
+  if (mv) return moveItem(pk, i, +mv.dataset.dir);
+  if (e.target.closest(".rm")) return removeItem(pk, i);
+});
+plHost.addEventListener("change", e => {
+  const card = e.target.closest(".pl"); if (!card) return;
+  const pk = card.dataset.pk;
+  if (e.target.classList.contains("pl-label")) return setLabel(pk, e.target.value);
+  const row = e.target.closest("tr[data-i]"); if (!row) return;
+  const i = +row.dataset.i, field = e.target.dataset.field;
+  if (field === "file") return setItemFile(pk, i, e.target.value);
+  if (field) return setItem(pk, i, field, e.target.value);
+});
+
+const ruleHost = document.getElementById("rules");
+ruleHost.addEventListener("click", e => {
+  const rule = e.target.closest(".rule"); if (!rule) return;
+  const i = +rule.dataset.i;
+  const mv = e.target.closest(".mv");
+  if (mv) return moveRule(i, +mv.dataset.dir);
+  if (e.target.closest(".rm")) return removeRule(i);
+});
+ruleHost.addEventListener("change", e => {
+  const rule = e.target.closest(".rule"); if (!rule) return;
+  const i = +rule.dataset.i;
+  if (e.target.classList.contains("day")) return toggleDay(i, +e.target.dataset.d, e.target.checked);
+  if (e.target.dataset.field) return setRule(i, e.target.dataset.field, e.target.value);
+});
 
 // --- Settings + submit ---
 document.getElementById("schedDefault").addEventListener("change", e => { DATA.schedule.default = e.target.value; });
@@ -379,7 +485,10 @@ setP.value = DATA.settings.poll_seconds ?? 60;
 setT.addEventListener("change", e => { DATA.settings.transition_ms = parseInt(e.target.value, 10) || 0; });
 setP.addEventListener("change", e => { DATA.settings.poll_seconds = parseInt(e.target.value, 10) || 60; });
 
-document.getElementById("editorForm").addEventListener("submit", () => {
+const editorForm = document.getElementById("editorForm");
+editorForm.addEventListener("input", markDirty);
+editorForm.addEventListener("change", markDirty);
+editorForm.addEventListener("submit", () => {
   // Tidy the data: drop empty start/end, force videos to duration 0
   for (const pk in DATA.playlists){
     (DATA.playlists[pk].items || []).forEach(it => {
@@ -389,7 +498,13 @@ document.getElementById("editorForm").addEventListener("submit", () => {
     });
   }
   document.getElementById("playlist_json").value = JSON.stringify(DATA, null, 2);
+  dirty = false;   // we're saving, so it's safe to navigate
 });
+// Saving via the raw-JSON form also clears the unsaved-changes guard.
+document.querySelectorAll("details.adv form").forEach(f => f.addEventListener("submit", () => { dirty = false; }));
+
+// Modern expectation: don't silently lose in-progress edits on refresh/close/back.
+window.addEventListener("beforeunload", e => { if (dirty){ e.preventDefault(); e.returnValue = ""; } });
 
 renderAll();
 </script>

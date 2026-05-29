@@ -211,7 +211,9 @@ function normalizeSchedule(sched){
     for (let d = 0; d < 7; d++){ const k = sched[String(d)]; if (k) (byPl[k] = byPl[k] || []).push(d); }
     for (const pl in byPl) rules.push({ days: byPl[pl], from: "00:00", to: "23:59", playlist: pl });
   }
-  return { rules, default: firstPlaylistKey() };
+  // The player's legacy path falls back to the literal playlist "default" on unmapped
+  // days; keep that so merely opening + saving a legacy file doesn't change the screen.
+  return { rules, default: "default" };
 }
 
 function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -315,31 +317,31 @@ function renderPlaylists(){
     let rows = "";
     pl.items.forEach((it, i) => {
       const isVid = it.type === "video";
-      rows += `<tr>
-        <td><select onchange="setItemFile('${pk}',${i},this.value)">${fileOptions(it.file)}</select></td>
+      rows += `<tr data-i="${i}">
+        <td><select data-field="file">${fileOptions(it.file)}</select></td>
         <td><span class="tag ${isVid ? 'video' : 'image'}">${isVid ? 'video' : 'image'}</span></td>
         <td>${isVid
           ? '<span class="muted">to end</span>'
-          : `<input type="number" min="1" value="${it.duration || 10}" onchange="setItem('${pk}',${i},'duration',this.value)">`}</td>
-        <td><input type="datetime-local" value="${esc(it.start || '')}" onchange="setItem('${pk}',${i},'start',this.value)"></td>
-        <td><input type="datetime-local" value="${esc(it.end || '')}" onchange="setItem('${pk}',${i},'end',this.value)"></td>
+          : `<input type="number" min="1" data-field="duration" value="${it.duration || 10}">`}</td>
+        <td><input type="datetime-local" data-field="start" value="${esc(it.start || '')}"></td>
+        <td><input type="datetime-local" data-field="end" value="${esc(it.end || '')}"></td>
         <td class="row-btns">
-          <button type="button" onclick="moveItem('${pk}',${i},-1)" title="Move up">↑</button>
-          <button type="button" onclick="moveItem('${pk}',${i},1)" title="Move down">↓</button>
-          <button type="button" onclick="removeItem('${pk}',${i})" title="Remove">✕</button>
+          <button type="button" class="mv" data-dir="-1" title="Move up">↑</button>
+          <button type="button" class="mv" data-dir="1" title="Move down">↓</button>
+          <button type="button" class="rm" title="Remove">✕</button>
         </td></tr>`;
     });
-    host.appendChild(el(`<div class="pl">
+    host.appendChild(el(`<div class="pl" data-pk="${esc(pk)}">
       <header>
         <div>id <code>${esc(pk)}</code> &nbsp; label
-          <input type="text" value="${esc(pl.label || '')}" onchange="setLabel('${pk}',this.value)"></div>
-        <button type="button" onclick="removePlaylist('${pk}')">Delete playlist</button>
+          <input type="text" class="pl-label" value="${esc(pl.label || '')}"></div>
+        <button type="button" class="rm-pl">Delete playlist</button>
       </header>
       <table class="items">
         <tr><th>File</th><th>Type</th><th>Duration (s)</th><th>Start (optional)</th><th>End (optional)</th><th></th></tr>
         ${rows || '<tr><td colspan="6" class="muted">No items yet.</td></tr>'}
       </table>
-      <p style="margin:.4rem 0 0"><button type="button" onclick="addItem('${pk}')">+ Add item</button></p>
+      <p style="margin:.4rem 0 0"><button type="button" class="add-item">+ Add item</button></p>
     </div>`));
   }
 }
@@ -353,18 +355,18 @@ function renderRules(){
   DATA.schedule.rules.forEach((r, i) => {
     const days = (r.days || []).map(Number);
     const dayboxes = DAY_NAMES.map((nm, d) =>
-      `<label><input type="checkbox"${days.includes(d) ? " checked" : ""} onchange="toggleDay(${i},${d},this.checked)">${nm}</label>`).join("");
+      `<label><input type="checkbox" class="day" data-d="${d}"${days.includes(d) ? " checked" : ""}>${nm}</label>`).join("");
     const plopts = Object.keys(DATA.playlists).map(k =>
       `<option value="${esc(k)}"${k === r.playlist ? " selected" : ""}>${esc(k)}</option>`).join("");
-    host.appendChild(el(`<div class="rule">
+    host.appendChild(el(`<div class="rule" data-i="${i}">
       <span class="days">${dayboxes}</span>
-      <span>from <input type="time" value="${esc(r.from || '00:00')}" onchange="setRule(${i},'from',this.value)"></span>
-      <span>to <input type="time" value="${esc(r.to || '23:59')}" onchange="setRule(${i},'to',this.value)"></span>
-      <span>show <select onchange="setRule(${i},'playlist',this.value)">${plopts}</select></span>
+      <span>from <input type="time" data-field="from" value="${esc(r.from || '00:00')}"></span>
+      <span>to <input type="time" data-field="to" value="${esc(r.to || '23:59')}"></span>
+      <span>show <select data-field="playlist">${plopts}</select></span>
       <span class="rule-btns">
-        <button type="button" onclick="moveRule(${i},-1)" title="Move up">↑</button>
-        <button type="button" onclick="moveRule(${i},1)" title="Move down">↓</button>
-        <button type="button" onclick="removeRule(${i})" title="Remove">✕</button>
+        <button type="button" class="mv" data-dir="-1" title="Move up">↑</button>
+        <button type="button" class="mv" data-dir="1" title="Move down">↓</button>
+        <button type="button" class="rm" title="Remove">✕</button>
       </span></div>`));
   });
 }
@@ -425,6 +427,45 @@ async function deleteFile(name){
 document.getElementById("fileRows").addEventListener("click", e => {
   const b = e.target.closest("button.del");
   if (b) deleteFile(b.dataset.name);
+});
+
+// --- Editor event delegation (one listener per container; survives re-renders, and
+//     avoids interpolating playlist ids into inline handlers — see fileRows pattern) ---
+const plHost = document.getElementById("playlists");
+plHost.addEventListener("click", e => {
+  const card = e.target.closest(".pl"); if (!card) return;
+  const pk = card.dataset.pk;
+  if (e.target.closest(".add-item")) return addItem(pk);
+  if (e.target.closest(".rm-pl")) return removePlaylist(pk);
+  const row = e.target.closest("tr[data-i]"); if (!row) return;
+  const i = +row.dataset.i;
+  const mv = e.target.closest(".mv");
+  if (mv) return moveItem(pk, i, +mv.dataset.dir);
+  if (e.target.closest(".rm")) return removeItem(pk, i);
+});
+plHost.addEventListener("change", e => {
+  const card = e.target.closest(".pl"); if (!card) return;
+  const pk = card.dataset.pk;
+  if (e.target.classList.contains("pl-label")) return setLabel(pk, e.target.value);
+  const row = e.target.closest("tr[data-i]"); if (!row) return;
+  const i = +row.dataset.i, field = e.target.dataset.field;
+  if (field === "file") return setItemFile(pk, i, e.target.value);
+  if (field) return setItem(pk, i, field, e.target.value);
+});
+
+const ruleHost = document.getElementById("rules");
+ruleHost.addEventListener("click", e => {
+  const rule = e.target.closest(".rule"); if (!rule) return;
+  const i = +rule.dataset.i;
+  const mv = e.target.closest(".mv");
+  if (mv) return moveRule(i, +mv.dataset.dir);
+  if (e.target.closest(".rm")) return removeRule(i);
+});
+ruleHost.addEventListener("change", e => {
+  const rule = e.target.closest(".rule"); if (!rule) return;
+  const i = +rule.dataset.i;
+  if (e.target.classList.contains("day")) return toggleDay(i, +e.target.dataset.d, e.target.checked);
+  if (e.target.dataset.field) return setRule(i, e.target.dataset.field, e.target.value);
 });
 
 // --- Settings + submit ---

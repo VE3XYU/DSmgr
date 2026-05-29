@@ -127,9 +127,12 @@ function resolvePlaylistKey(now) {
     for (const r of sched.rules) {
       if (!r || !r.playlist) continue;
       if (Array.isArray(r.days) && !r.days.map(Number).includes(day)) continue;
-      const lo = hhmmToMin(r.from);
-      const hi = hhmmToMin(r.to);
-      if (mins >= (lo ?? 0) && mins < (hi ?? 1440)) return r.playlist;
+      const lo = hhmmToMin(r.from) ?? 0;
+      let hi = hhmmToMin(r.to) ?? 1440;
+      // The editor emits "23:59" as its end-of-day value; treat it as midnight so the
+      // final minute of the day isn't left uncovered (matching is half-open: [lo, hi)).
+      if (hi === 1439) hi = 1440;
+      if (mins >= lo && mins < hi) return r.playlist;
     }
     return sched.default || "default";
   }
@@ -152,11 +155,13 @@ function rebuildQueue() {
   const pl = cfg.playlists?.[key] || cfg.playlists?.default;
   const newQueue = (pl?.items || []).filter(it => it && it.file && itemActive(it, now));
   const sig = key + "|" + JSON.stringify(newQueue);
-  // Only disturb playback when the resolved queue actually changes
+  // Only disturb playback when the resolved queue actually changes; when it does,
+  // restart from the top so a content/schedule change can't leave idx pointing at
+  // shifted items (which would silently skip one each change).
   if (sig !== currentSig) {
     queue = newQueue;
     currentSig = sig;
-    if (idx >= queue.length) idx = 0;
+    idx = 0;
   }
   showMsg(queue.length ? "" : ("nothing scheduled for '" + key + "' right now"));
 }

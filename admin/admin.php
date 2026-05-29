@@ -133,6 +133,8 @@ $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAP
 </head>
 <body>
   <h1>Digital Signage Manager — Dashboard</h1>
+  <noscript><p class="notice" style="background:#fff3cd;border-color:#ffe69c">
+    This dashboard needs JavaScript to manage files and edit playlists. Please enable it.</p></noscript>
   <p class="notice" id="notice"<?= $notice ? '' : ' style="display:none"' ?>><?= htmlspecialchars($notice) ?></p>
 
   <h2>Upload media</h2>
@@ -194,7 +196,7 @@ $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAP
   </details>
 
 <script>
-const VIDEO_EXT = ["mp4","webm","m4v"];
+const VIDEO_EXT = <?= json_encode(array_values($VIDEO_EXT), $JS) ?>;  // single source of truth: PHP $VIDEO_EXT
 const DAY_NAMES = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const FILES = <?= json_encode($files, $JS) ?>;
 let DATA = <?= json_encode($playlist_data, $JS) ?>;

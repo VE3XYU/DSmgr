@@ -41,24 +41,52 @@ In your Chromium kiosk launch command, the URL is:
 ```
 https://yoursite/mds/player.html
 ```
-The player auto-detects the weekday, plays the matching playlist, crossfades between
-items, plays videos to the end, and re-checks playlist.json every 60s so new content
-appears without touching the Pi.
+The player picks the right playlist for the current weekday **and time of day**, crossfades
+between items, plays videos to the end, hides items outside their scheduled window, and
+re-checks playlist.json every 60s so new content appears without touching the Pi.
+
+It is built to run unattended for months: each video's decoder is released after it plays
+(so memory doesn't creep), stuck or missing media is skipped instead of freezing the screen,
+a corrupt or half-written playlist.json can never replace the last good one, and an
+independent watchdog revives the loop if anything ever wedges. For extra insurance against
+long-term browser memory growth you can set `reload_hours` (see below).
 
 ## playlist.json format
+You normally won't hand-edit this — the dashboard has a visual editor (add/reorder/remove
+items, pick files, set durations and start/end windows, and build schedule rules). The
+**Advanced** toggle still exposes the raw JSON, which is validated before saving.
+
 ```json
 {
   "playlists": {
-    "default":  { "label": "Everyday", "items": [ {"file":"welcome.jpg","type":"image","duration":10} ] },
-    "weekend":  { "label": "Weekend",  "items": [ {"file":"clip.mp4","type":"video","duration":0} ] }
+    "default": { "label": "Everyday", "items": [
+      { "file": "welcome.jpg", "type": "image", "duration": 10 }
+    ] },
+    "weekend": { "label": "Weekend", "items": [
+      { "file": "clip.mp4", "type": "video", "duration": 0, "end": "2026-03-21T00:00" }
+    ] }
   },
-  "schedule": { "0":"weekend","1":"default","2":"default","3":"default","4":"default","5":"default","6":"weekend" },
-  "settings": { "transition_ms": 800, "poll_seconds": 60 }
+  "schedule": {
+    "rules": [
+      { "days": [0, 6],          "from": "00:00", "to": "23:59", "playlist": "weekend" },
+      { "days": [1,2,3,4,5],     "from": "00:00", "to": "17:00", "playlist": "default" },
+      { "days": [1,2,3,4,5],     "from": "17:00", "to": "23:59", "playlist": "afterhours" }
+    ],
+    "default": "default"
+  },
+  "settings": { "transition_ms": 800, "poll_seconds": 60, "reload_hours": 0 }
 }
 ```
-- `duration` is seconds for images; use `0` for video (plays to its natural end).
-- `schedule` keys: `0`=Sunday … `6`=Saturday → the playlist name to show that day.
-- You normally won't hand-edit this — the dashboard's text box does it, and validates the JSON before saving.
+- **Items:** `duration` is seconds for images; use `0` for video (plays to its natural end).
+  Optional `start` / `end` are local datetimes (`YYYY-MM-DDTHH:MM`) — the item only shows
+  inside that window and **self-expires** once `end` passes (no need to delete it).
+- **Schedule (`rules`):** checked top to bottom; the first rule matching today's weekday
+  (`0`=Sunday … `6`=Saturday) and the current time wins. `from`/`to` are `HH:MM`; `to` is
+  exclusive. `default` is the fallback playlist when no rule matches. *(The old flat map —
+  `"schedule": {"0":"weekend", …}` — still works and is upgraded to rules when you open the editor.)*
+- **Settings:** `transition_ms` crossfade length · `poll_seconds` how often the Pi re-reads
+  this file · `reload_hours` optional full-page reload interval for extra long-run stability
+  (`0` = off; the reload waits for an item boundary so it never cuts a video).
 
 ## Notes / gotchas
 - **Image sizing:** export at exactly 1920×1080 with text kept ~5% inside the edges. The player letterboxes (`object-fit: contain`) so nothing is cropped; switch to `cover` in player.html if you'd rather fill-and-crop.

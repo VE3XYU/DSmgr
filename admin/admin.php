@@ -48,15 +48,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
       $notice = "NOT SAVED — invalid JSON: " . json_last_error_msg();
     } else {
-      // pretty-print so it stays human-editable; write atomically (temp + rename)
-      // so the player never reads a half-written file mid-save.
+      // pretty-print so it stays human-editable. Prefer an atomic temp+rename so the
+      // player never reads a half-written file; if the directory isn't writable (some
+      // hosts allow overwriting the existing file but not creating/renaming in the dir),
+      // fall back to an in-place write so saving still works.
       $json = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
       $tmp  = $PLAYLIST . '.tmp';
-      if (file_put_contents($tmp, $json) !== false && rename($tmp, $PLAYLIST)) {
+      if (@file_put_contents($tmp, $json) !== false && @rename($tmp, $PLAYLIST)) {
         $notice = "Playlist saved.";
       } else {
         @unlink($tmp);
-        $notice = "NOT SAVED — could not write playlist.json (check folder permissions).";
+        if (@file_put_contents($PLAYLIST, $json) !== false) {
+          $notice = "Playlist saved.";
+        } else {
+          $notice = "NOT SAVED — could not write playlist.json (check folder permissions).";
+        }
       }
     }
   }

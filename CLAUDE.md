@@ -72,3 +72,10 @@ host, not in code — see `SETUP.md`.
 
 Setup, cPanel auth, and host PHP limits (`upload_max_filesize`, `post_max_size`, etc.) are documented in
 `SETUP.md`. The targeted feature roadmap is in `README.md`.
+
+## Working conventions
+
+- **Branch per task.** After a PR merges, start the next piece of work on a *new* branch off the
+  latest `main` — don't keep committing to the just-merged branch (those commits strand outside the
+  merged PR and need a fresh one anyway).
+- **No Claude session link** in commit messages or PR descriptions.

@@ -129,6 +129,14 @@ $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAP
   .rule input[type=time] { font-size:.8rem; }
   .muted { color:#999; } .missing { color:#c00; }
   details.adv { margin-top:1.5rem; } details.adv summary { cursor:pointer; color:#36c; }
+
+  /* --- Preview modal (embeds the real player.html in an iframe) --- */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.82); z-index:1000; display:flex; flex-direction:column; }
+  .modal[hidden] { display:none; }
+  .modal-bar { display:flex; justify-content:space-between; align-items:center; color:#eee; padding:.5rem .9rem; font-size:.9rem; }
+  .modal-bar button { background:#333; color:#eee; border:1px solid #555; border-radius:5px; }
+  .modal-stage { flex:1; display:flex; align-items:center; justify-content:center; padding:0 1rem 1rem; min-height:0; }
+  .modal-stage iframe { width:100%; max-width:calc((100vh - 90px) * 16 / 9); aspect-ratio:16 / 9; border:0; background:#000; box-shadow:0 0 30px rgba(0,0,0,.6); }
 </style>
 </head>
 <body>
@@ -151,6 +159,16 @@ $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAP
     <thead><tr><th>File</th><th>Type</th><th>Size</th><th></th></tr></thead>
     <tbody id="fileRows"></tbody>
   </table>
+
+  <h2>Preview</h2>
+  <p style="font-size:.85rem;color:#555">See the feed exactly as the screen renders it (same player, crossfades and all).
+    Previews the <b>saved</b> playlist.json — Save your changes first to preview them.</p>
+  <p>
+    <label>Show:
+      <select id="previewKey"></select>
+    </label>
+    <button type="button" id="previewBtn">Open preview</button>
+  </p>
 
   <h2>Playlists &amp; schedule</h2>
   <p style="font-size:.85rem;color:#555">
@@ -194,6 +212,14 @@ $JS = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAP
       <p><button type="submit">Save raw JSON</button></p>
     </form>
   </details>
+
+  <div id="previewModal" class="modal" hidden>
+    <div class="modal-bar">
+      <span id="previewTitle">Preview</span>
+      <button type="button" id="previewClose">Close ✕</button>
+    </div>
+    <div class="modal-stage"><iframe id="previewFrame" title="Feed preview" allow="autoplay"></iframe></div>
+  </div>
 
 <script>
 const VIDEO_EXT = <?= json_encode(array_values($VIDEO_EXT), $JS) ?>;  // single source of truth: PHP $VIDEO_EXT
@@ -388,7 +414,16 @@ function renderSchedDefault(){
     : '<option value="default">default</option>';
 }
 
-function renderAll(){ renderFiles(); renderPlaylists(); renderRules(); renderSchedDefault(); }
+function renderPreviewOptions(){
+  const sel = document.getElementById("previewKey");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Live — current schedule</option>' +
+    Object.keys(DATA.playlists).map(k =>
+      `<option value="${esc(k)}">${esc(DATA.playlists[k].label || k)} (${esc(k)})</option>`).join("");
+  sel.value = cur;   // keep the selection across re-renders when still valid
+}
+
+function renderAll(){ renderFiles(); renderPlaylists(); renderRules(); renderSchedDefault(); renderPreviewOptions(); }
 
 // --- Uploads & deletes over fetch, so the page never reloads mid-edit ---
 function setNotice(msg){
@@ -505,6 +540,23 @@ document.querySelectorAll("details.adv form").forEach(f => f.addEventListener("s
 
 // Modern expectation: don't silently lose in-progress edits on refresh/close/back.
 window.addEventListener("beforeunload", e => { if (dirty){ e.preventDefault(); e.returnValue = ""; } });
+
+// --- Preview: embed the real player.html (one dir up) in an iframe ---
+const previewModal = document.getElementById("previewModal");
+const previewFrame = document.getElementById("previewFrame");
+function openPreview(){
+  const key = document.getElementById("previewKey").value;
+  document.getElementById("previewTitle").textContent = key ? ("Preview — " + key) : "Preview — live schedule";
+  previewFrame.src = "../player.html" + (key ? "?preview=" + encodeURIComponent(key) : "");
+  previewModal.hidden = false;
+}
+function closePreview(){
+  previewModal.hidden = true;
+  previewFrame.src = "about:blank";   // stop the embedded player and free its resources
+}
+document.getElementById("previewBtn").addEventListener("click", openPreview);
+document.getElementById("previewClose").addEventListener("click", closePreview);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !previewModal.hidden) closePreview(); });
 
 renderAll();
 </script>

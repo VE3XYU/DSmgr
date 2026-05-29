@@ -15,7 +15,7 @@ Features:
 5. ✅ Manage the order in which media are displayed
 6. ✅ Set a schedule for each item (start/end date/time)
 7. ✅ Set schedules for different days **and** times of day
-8. ⬜ Preview mode to see the end result of the feed *(planned)*
+8. ✅ Preview mode — watch the feed exactly as the screen renders it, live or per-playlist, from the dashboard
 
 Built to run unattended: the player releases video memory as it goes, skips stuck or missing
 media instead of freezing, survives a corrupt/half-written playlist, and self-recovers via a

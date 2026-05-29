@@ -33,6 +33,10 @@ Three moving parts share state only through `playlist.json` on disk:
 because it lives one level down in `admin/`. The deployed layout is e.g. `mds/player.html`,
 `mds/playlist.json`, `mds/admin/admin.php`, `mds/uploads/` — preserve that relative structure.
 
+The admin **Preview** embeds this same `player.html` in an iframe (`../player.html`, optionally
+`?preview=<key>` to force one playlist and bypass the schedule), so a preview is a faithful render
+with zero duplicated loop logic. It reflects the *saved* `playlist.json`.
+
 ## Key behaviors to preserve when editing
 
 - **player.html** is built to run unattended for months — treat its reliability scaffolding as
